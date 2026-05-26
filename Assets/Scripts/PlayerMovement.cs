@@ -1,3 +1,4 @@
+using System.Collections;
 using Unity.Netcode;
 using Unity.Netcode.Components;
 using UnityEngine;
@@ -11,9 +12,18 @@ public class PlayerMovement : NetworkBehaviour
     const float Gravity = -20f;
     const float GroundY = 0.5f;
     const float Bound   = 4.5f;
+    public int CurrentEffect => _effect.Value;
+    static readonly Color ColorBuff   = Color.green;
+    static readonly Color ColorDebuff = Color.red;
+    static readonly Color ColorNormal = Color.white;
 
     float _velocityY;
-    float _localVelocityY;  
+    float _localVelocityY;
+
+    readonly NetworkVariable<int> _effect =
+        new(0, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
+    readonly NetworkVariable<Color> _color =
+        new(Color.white, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
 
     InputAction _moveAction;
     InputAction _jumpAction;
@@ -32,37 +42,40 @@ public class PlayerMovement : NetworkBehaviour
         if (IsServer)
             transform.position = new Vector3(
                 Random.Range(-3f, 3f), GroundY, Random.Range(-3f, 3f));
+
+        _color.OnValueChanged += (_, c) => GetComponent<Renderer>().material.color = c;
+        GetComponent<Renderer>().material.color = _color.Value;
     }
 
-void Update()
-{
-    if (!IsOwner || _moveAction == null || _jumpAction == null) return;
-
-    var input = _moveAction.ReadValue<Vector2>();
-    bool jump  = _jumpAction.WasPressedThisFrame();
-    int mode   = GameManager.Instance?.Mode ?? 0;
-
-    GetComponent<NetworkTransform>().enabled = mode != 2;
-
-    if (input == Vector2.zero && !jump && transform.position.y <= GroundY + 0.05f) return;
-
-    switch (mode)
+    void Update()
     {
-        case 0:
-            if (input != Vector2.zero || jump || transform.position.y > GroundY + 0.05f)
+        if (!IsOwner || _moveAction == null || _jumpAction == null) return;
+
+        var input = _moveAction.ReadValue<Vector2>();
+        bool jump  = _jumpAction.WasPressedThisFrame();
+        int mode   = GameManager.Instance?.Mode ?? 0;
+
+        GetComponent<NetworkTransform>().enabled = mode != 2;
+
+        if (input == Vector2.zero && !jump && transform.position.y <= GroundY + 0.05f) return;
+
+        switch (mode)
+        {
+            case 0:
+                if (input != Vector2.zero || jump || transform.position.y > GroundY + 0.05f)
+                    MoveServerRpc(input, jump);
+                break;
+
+            case 1:
                 MoveServerRpc(input, jump);
-            break;
+                break;
 
-        case 1:
-            MoveServerRpc(input, jump);
-            break;
-
-        case 2:
-            ApplyMovement(input, jump, ref _localVelocityY);
-            SyncPositionServerRpc(transform.position, _localVelocityY);
-            break;
+            case 2:
+                ApplyMovement(input, jump, ref _localVelocityY);
+                SyncPositionServerRpc(transform.position, _localVelocityY);
+                break;
+        }
     }
-}
 
     [ServerRpc]
     void MoveServerRpc(Vector2 input, bool jump)
@@ -88,8 +101,8 @@ void Update()
         if (!IsOwner) return;
         if (Vector3.Distance(transform.position, serverPos) > 0.5f)
         {
-            transform.position  = serverPos;
-            _localVelocityY     = serverVelocityY;
+            transform.position = serverPos;
+            _localVelocityY    = serverVelocityY;
         }
     }
 
@@ -97,17 +110,36 @@ void Update()
     {
         bool grounded = transform.position.y <= GroundY + 0.05f;
 
-        if (grounded && jump)       velocityY = Jump;
-        else if (grounded)          velocityY = Mathf.Max(velocityY, 0f);
+        if (grounded && jump)  velocityY = Jump;
+        else if (grounded)     velocityY = Mathf.Max(velocityY, 0f);
 
         velocityY += Gravity * Time.deltaTime;
 
-        var pos = transform.position + new Vector3(input.x * Speed, velocityY, input.y * Speed) * Time.deltaTime;
+        float speed = _effect.Value == 1 ? Speed * 1.5f :
+                      _effect.Value == 2 ? Speed * 0.5f : Speed;
+
+        var pos = transform.position + new Vector3(input.x * speed, velocityY, input.y * speed) * Time.deltaTime;
         pos.y = Mathf.Max(pos.y, GroundY);
         pos.x = Mathf.Clamp(pos.x, -Bound, Bound);
         pos.z = Mathf.Clamp(pos.z, -Bound, Bound);
 
         if (pos.y == GroundY && velocityY < 0) velocityY = 0f;
         transform.position = pos;
+    }
+
+    public void ApplyEffect(int effect, float duration)
+    {
+        StartCoroutine(EffectCoroutine(effect, duration));
+    }
+
+    IEnumerator EffectCoroutine(int effect, float duration)
+    {
+        _effect.Value = effect;
+        _color.Value  = effect == 1 ? ColorBuff : ColorDebuff;
+
+        yield return new WaitForSeconds(duration);
+
+        _effect.Value = 0;
+        _color.Value  = ColorNormal;
     }
 }
